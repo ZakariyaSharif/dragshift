@@ -20,21 +20,25 @@ from AppKit import (
     NSEventMaskLeftMouseDragged,
     NSEventMaskLeftMouseUp,
     NSEventModifierFlagShift,
+    NSFilenamesPboardType,
     NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
     NSMakeRect,
+    NSMutableParagraphStyle,
     NSPanel,
+    NSParagraphStyleAttributeName,
     NSPasteboard,
     NSPasteboardNameDrag,
     NSPasteboardTypeFileURL,
     NSScreen,
     NSSound,
     NSTextAlignmentCenter,
-    NSTextField,
     NSView,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSURL
+from Foundation import NSURL, NSString
 from PyObjCTools import AppHelper
 
 from . import converter
@@ -80,20 +84,34 @@ class Tile(NSView):
         self.setWantsLayer_(True)
         self.layer().setCornerRadius_(12)
         self._paint()
-        label = NSTextField.labelWithString_(ext.upper())
-        label.setFont_(NSFont.boldSystemFontOfSize_(16))
-        label.setTextColor_(NSColor.whiteColor())
-        label.setAlignment_(NSTextAlignmentCenter)
-        label.setFrame_(NSMakeRect(0, (TILE_H - 22) / 2, TILE_W, 22))
-        self.addSubview_(label)
-        self.registerForDraggedTypes_([NSPasteboardTypeFileURL])
+        self.registerForDraggedTypes_([NSPasteboardTypeFileURL, NSFilenamesPboardType])
         return self
+
+    def drawRect_(self, rect):
+        # Text is drawn here, not in a subview: a label subview would swallow the drag.
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setAlignment_(NSTextAlignmentCenter)
+        attrs = {
+            NSFontAttributeName: NSFont.boldSystemFontOfSize_(16),
+            NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSParagraphStyleAttributeName: style,
+        }
+        NSString.stringWithString_(self.ext.upper()).drawInRect_withAttributes_(
+            NSMakeRect(0, (TILE_H - 22) / 2, TILE_W, 22), attrs
+        )
+
+    def draggingUpdated_(self, sender):
+        return NSDragOperationCopy
+
+    def prepareForDragOperation_(self, sender):
+        return True
 
     def _paint(self):
         c = NSColor.systemOrangeColor() if self.hot else NSColor.colorWithWhite_alpha_(0.25, 1.0)
         self.layer().setBackgroundColor_(c.CGColor())
 
     def draggingEntered_(self, sender):
+        print(f"drag entered {self.ext}", flush=True)
         self.hot = True
         self._paint()
         return NSDragOperationCopy
