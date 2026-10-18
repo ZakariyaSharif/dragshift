@@ -6,6 +6,7 @@ misbehaves, run `python -m dragshift` from Terminal to see the errors.
 """
 from __future__ import annotations
 
+import math
 import threading
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from AppKit import (
     NSFont,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
+    NSMakePoint,
     NSMakeRect,
     NSMutableParagraphStyle,
     NSPanel,
@@ -45,7 +47,6 @@ from PyObjCTools import AppHelper
 
 from . import converter
 
-TILE_W, TILE_H, GAP, PAD = 84, 64, 8, 12
 
 
 def check_permissions():
@@ -75,11 +76,14 @@ def dragged_files() -> list[Path]:
     return [Path(u.path()) for u in urls if u.isFileURL() and Path(u.path()).is_file()]
 
 
-class Strip(NSView):
-    """The whole panel: draws every tile and is the single drop destination."""
+R_OUT, R_IN, MARGIN, GAP_DEG = 128, 40, 10, 2.5
+
+
+class Wheel(NSView):
+    """Radial menu: wedges around the cursor, the whole view is the drop destination."""
 
     def initWithFrame_exts_owner_(self, frame, exts, owner):
-        self = objc.super(Strip, self).initWithFrame_(frame)
+        self = objc.super(Wheel, self).initWithFrame_(frame)
         if self is None:
             return None
         self.exts, self.owner, self.hot = list(exts), owner, -1
@@ -87,16 +91,20 @@ class Strip(NSView):
         return self
 
     @objc.python_method
-    def tileRect(self, i):
-        return NSMakeRect(PAD + i * (TILE_W + GAP), PAD, TILE_W, TILE_H)
+    def center(self):
+        b = self.bounds()
+        return b.size.width / 2, b.size.height / 2
 
     @objc.python_method
     def indexFor(self, sender):
         pt = self.convertPoint_fromView_(sender.draggingLocation(), None)
-        for i in range(len(self.exts)):
-            if NSPointInRect(pt, self.tileRect(i)):
-                return i
-        return -1
+        cx, cy = self.center()
+        dx, dy = pt.x - cx, pt.y - cy
+        if not (R_IN <= math.hypot(dx, dy) <= R_OUT):
+            return -1
+        span = 360 / len(self.exts)
+        cw = (90 - math.degrees(math.atan2(dy, dx))) % 360  # clockwise from the top
+        return int(cw // span)
 
     @objc.python_method
     def setHot(self, i):
@@ -105,22 +113,42 @@ class Strip(NSView):
             self.setNeedsDisplay_(True)
 
     def drawRect_(self, rect):
-        NSColor.colorWithWhite_alpha_(0.1, 0.92).set()
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(self.bounds(), 16, 16).fill()
+        cx, cy = self.center()
+        c = NSMakePoint(cx, cy)
+        n = len(self.exts)
+        span = 360 / n
         style = NSMutableParagraphStyle.alloc().init()
         style.setAlignment_(NSTextAlignmentCenter)
-        attrs = {
-            NSFontAttributeName: NSFont.boldSystemFontOfSize_(16),
-            NSForegroundColorAttributeName: NSColor.whiteColor(),
-            NSParagraphStyleAttributeName: style,
-        }
+
+        def attrs(size, color):
+            return {
+                NSFontAttributeName: NSFont.boldSystemFontOfSize_(size),
+                NSForegroundColorAttributeName: color,
+                NSParagraphStyleAttributeName: style,
+            }
+
         for i, ext in enumerate(self.exts):
-            r = self.tileRect(i)
-            (NSColor.systemOrangeColor() if i == self.hot else NSColor.colorWithWhite_alpha_(0.25, 1.0)).set()
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(r, 12, 12).fill()
+            hi = 90 - i * span - GAP_DEG
+            lo = 90 - (i + 1) * span + GAP_DEG
+            path = NSBezierPath.bezierPath()
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(c, R_OUT, lo, hi, False)
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(c, R_IN, hi, lo, True)
+            path.closePath()
+            if i == self.hot:
+                NSColor.systemOrangeColor().set()
+            else:
+                NSColor.colorWithWhite_alpha_(0.12, 0.88).set()
+            path.fill()
+            mid = math.radians(90 - (i + 0.5) * span)
+            rm = (R_IN + R_OUT) / 2
+            tx, ty = cx + rm * math.cos(mid), cy + rm * math.sin(mid)
             NSString.stringWithString_(ext.upper()).drawInRect_withAttributes_(
-                NSMakeRect(r.origin.x, r.origin.y + (TILE_H - 22) / 2, TILE_W, 22), attrs
+                NSMakeRect(tx - 40, ty - 11, 80, 22), attrs(15, NSColor.whiteColor())
             )
+        hint = "\u21e7" if self.hot < 0 else self.exts[self.hot].upper()
+        NSString.stringWithString_(hint).drawInRect_withAttributes_(
+            NSMakeRect(cx - 36, cy - 12, 72, 24), attrs(18, NSColor.colorWithWhite_alpha_(1.0, 0.8))
+        )
 
     def draggingEntered_(self, sender):
         return self.draggingUpdated_(sender)
@@ -159,14 +187,13 @@ class DropPanel:
             return
         self.hide()
         self.files = files
-        w = PAD * 2 + len(exts) * TILE_W + (len(exts) - 1) * GAP
-        h = PAD * 2 + TILE_H
+        size = 2 * (R_OUT + MARGIN)
         p = NSEvent.mouseLocation()
-        screen = NSScreen.mainScreen().frame()
-        x = min(max(p.x - w / 2, 10), screen.size.width - w - 10)
-        y = p.y + 30 if p.y + 30 + h < screen.size.height else p.y - h - 30
+        scr = NSScreen.mainScreen().frame()
+        x = min(max(p.x - size / 2, 4), scr.size.width - size - 4)
+        y = min(max(p.y - size / 2, 4), scr.size.height - size - 4)
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, w, h),
+            NSMakeRect(x, y, size, size),
             NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
             NSBackingStoreBuffered,
             False,
@@ -174,11 +201,13 @@ class DropPanel:
         panel.setLevel_(1000)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(True)
+        panel.setHasShadow_(False)
         panel.setHidesOnDeactivate_(False)
-        strip = Strip.alloc().initWithFrame_exts_owner_(NSMakeRect(0, 0, w, h), exts, self)
-        panel.setContentView_(strip)
+        wheel = Wheel.alloc().initWithFrame_exts_owner_(NSMakeRect(0, 0, size, size), exts, self)
+        panel.setContentView_(wheel)
+        panel.setAlphaValue_(0.0)
         panel.orderFrontRegardless()
+        panel.animator().setAlphaValue_(1.0)
         self.panel = panel
 
     def hide(self):
@@ -217,8 +246,6 @@ class DragShift(rumps.App):
             files = dragged_files()
             if files:
                 self.drop.show(files)
-        elif not shift and self.drop.panel is not None:
-            self.drop.hide()
 
     @staticmethod
     def _notify(title: str, message: str):
