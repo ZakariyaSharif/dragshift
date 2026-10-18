@@ -1,0 +1,5 @@
+pillow
+pillow-heif
+pymupdf
+rumps
+pyobjc-framework-Cocoa
