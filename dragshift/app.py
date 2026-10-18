@@ -105,6 +105,13 @@ def dragged_files() -> list[Path]:
 R_OUT, R_IN, MARGIN, GAP_DEG = 128, 40, 10, 2.5
 
 
+def wedge_index(dx: float, dy: float, n: int) -> int:
+    if not (R_IN <= math.hypot(dx, dy) <= R_OUT):
+        return -1
+    cw = (90 - math.degrees(math.atan2(dy, dx))) % 360  # clockwise from the top
+    return int(cw // (360 / n))
+
+
 class Wheel(NSView):
     """Radial menu: wedges around the cursor, the whole view is the drop destination."""
 
@@ -125,12 +132,7 @@ class Wheel(NSView):
     def indexFor(self, sender):
         pt = self.convertPoint_fromView_(sender.draggingLocation(), None)
         cx, cy = self.center()
-        dx, dy = pt.x - cx, pt.y - cy
-        if not (R_IN <= math.hypot(dx, dy) <= R_OUT):
-            return -1
-        span = 360 / len(self.exts)
-        cw = (90 - math.degrees(math.atan2(dy, dx))) % 360  # clockwise from the top
-        return int(cw // span)
+        return wedge_index(pt.x - cx, pt.y - cy, len(self.exts))
 
     @objc.python_method
     def setHot(self, i):
@@ -242,12 +244,19 @@ class DropPanel:
         panel.setHidesOnDeactivate_(False)
         wheel = Wheel.alloc().initWithFrame_exts_owner_(NSMakeRect(0, 0, size, size), exts, self)
         panel.setContentView_(wheel)
+        self.wheel = wheel
         wheel.registerForDraggedTypes_([NSPasteboardTypeFileURL, NSFilenamesPboardType])
         log(f"show wheel for {files[0].name}: {exts}")
         panel.setAlphaValue_(0.0)
         panel.orderFrontRegardless()
         panel.animator().setAlphaValue_(1.0)
         self.panel = panel
+
+    def index_at_mouse(self) -> int:
+        if self.panel is None:
+            return -1
+        p, f = NSEvent.mouseLocation(), self.panel.frame()
+        return wedge_index(p.x - (f.origin.x + f.size.width / 2), p.y - (f.origin.y + f.size.height / 2), len(self.wheel.exts))
 
     def hide(self):
         if self.panel is not None:
@@ -277,16 +286,18 @@ class DragShift(rumps.App):
         AppHelper.callAfter(apply)
 
     def _on_event(self, event):
-        if event.type() == 2:
+        if event.type() == 2:  # left mouse up: convert if released over a wedge
             self._seen = False
-            log("mouse up (global)")  # NSEventTypeLeftMouseUp: give the drop time to land
+            i = self.drop.index_at_mouse()
+            log(f"mouse up (global), wedge={i}")
+            if i >= 0:
+                self.run_conversion(self.drop.files, self.drop.wheel.exts[i])
             AppHelper.callLater(0.4, self.drop.hide)
             return
         shift = bool(event.modifierFlags() & NSEventModifierFlagShift)
-        if shift and self.drop.panel is None and not getattr(self, "_seen", False):
-            self._seen = True
-            log(f"shift+drag seen; files={[f.name for f in dragged_files()]}")
-        if shift and self.drop.panel is None:
+        if self.drop.panel is not None:
+            self.drop.wheel.setHot(self.drop.index_at_mouse())
+        elif shift:
             files = dragged_files()
             if files:
                 self.drop.show(files)
