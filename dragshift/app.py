@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from pathlib import Path
 
 import objc
@@ -46,6 +47,31 @@ from Foundation import NSURL, NSString
 from PyObjCTools import AppHelper
 
 from . import converter
+
+LOG = Path(__file__).resolve().parent.parent / "debug.log"
+
+
+def log(msg: str):
+    print(msg, flush=True)
+    try:
+        with LOG.open("a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
+
+
+def logged(fn):
+    """Log any exception from a PyObjC callback instead of failing silently."""
+    import functools, traceback
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        try:
+            return fn(*a, **k)
+        except Exception:
+            log("ERROR in " + fn.__name__ + ":\n" + traceback.format_exc())
+            raise
+    return wrapper
 
 
 
@@ -112,6 +138,7 @@ class Wheel(NSView):
             self.hot = i
             self.setNeedsDisplay_(True)
 
+    @logged
     def drawRect_(self, rect):
         cx, cy = self.center()
         c = NSMakePoint(cx, cy)
@@ -150,27 +177,37 @@ class Wheel(NSView):
             NSMakeRect(cx - 36, cy - 12, 72, 24), attrs(18, NSColor.colorWithWhite_alpha_(1.0, 0.8))
         )
 
+    @logged
     def draggingEntered_(self, sender):
-        return self.draggingUpdated_(sender)
+        log("drag ENTERED wheel")
+        return NSDragOperationCopy
 
+    @logged
     def draggingUpdated_(self, sender):
         i = self.indexFor(sender)
+        if i != self.hot:
+            log(f"drag over wedge {i}")
         self.setHot(i)
         return NSDragOperationCopy if i >= 0 else NSDragOperationNone
 
+    @logged
     def draggingExited_(self, sender):
         self.setHot(-1)
 
+    @logged
     def prepareForDragOperation_(self, sender):
+        log("prepareForDragOperation")
         return self.indexFor(sender) >= 0
 
+    @logged
     def performDragOperation_(self, sender):
+        log("performDragOperation")
         i = self.indexFor(sender)
         if i < 0:
             return False
         urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None) or []
         files = [Path(u.path()) for u in urls if u.isFileURL()]
-        print(f"drop on {self.exts[i]}: {[f.name for f in files]}", flush=True)
+        log(f"DROP on {self.exts[i]}: {[f.name for f in files]}")
         self.setHot(-1)
         self.owner.convert_files(files, self.exts[i])
         AppHelper.callLater(0.2, self.owner.hide)
@@ -205,6 +242,8 @@ class DropPanel:
         panel.setHidesOnDeactivate_(False)
         wheel = Wheel.alloc().initWithFrame_exts_owner_(NSMakeRect(0, 0, size, size), exts, self)
         panel.setContentView_(wheel)
+        wheel.registerForDraggedTypes_([NSPasteboardTypeFileURL, NSFilenamesPboardType])
+        log(f"show wheel for {files[0].name}: {exts}")
         panel.setAlphaValue_(0.0)
         panel.orderFrontRegardless()
         panel.animator().setAlphaValue_(1.0)
@@ -238,10 +277,15 @@ class DragShift(rumps.App):
         AppHelper.callAfter(apply)
 
     def _on_event(self, event):
-        if event.type() == 2:  # NSEventTypeLeftMouseUp: give the drop time to land
+        if event.type() == 2:
+            self._seen = False
+            log("mouse up (global)")  # NSEventTypeLeftMouseUp: give the drop time to land
             AppHelper.callLater(0.4, self.drop.hide)
             return
         shift = bool(event.modifierFlags() & NSEventModifierFlagShift)
+        if shift and self.drop.panel is None and not getattr(self, "_seen", False):
+            self._seen = True
+            log(f"shift+drag seen; files={[f.name for f in dragged_files()]}")
         if shift and self.drop.panel is None:
             files = dragged_files()
             if files:
