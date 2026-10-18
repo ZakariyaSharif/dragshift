@@ -27,6 +27,7 @@ from AppKit import (
     NSPasteboardNameDrag,
     NSPasteboardTypeFileURL,
     NSScreen,
+    NSSound,
     NSTextAlignmentCenter,
     NSTextField,
     NSView,
@@ -39,6 +40,27 @@ from PyObjCTools import AppHelper
 from . import converter
 
 TILE_W, TILE_H, GAP, PAD = 84, 64, 8, 12
+
+
+def check_permissions():
+    """Report (and request) the permissions the global drag monitor needs."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        lib.CGPreflightListenEventAccess.restype = ctypes.c_bool
+        lib.CGRequestListenEventAccess.restype = ctypes.c_bool
+        if not lib.CGPreflightListenEventAccess():
+            lib.CGRequestListenEventAccess()
+            print(
+                "DragShift needs Input Monitoring: System Settings > Privacy & Security > "
+                "Input Monitoring, enable Terminal, then restart this app.",
+                flush=True,
+            )
+        else:
+            print("Input Monitoring: OK", flush=True)
+    except Exception as e:
+        print(f"(could not check Input Monitoring: {e})", flush=True)
 
 
 def dragged_files() -> list[Path]:
@@ -87,6 +109,7 @@ class Tile(NSView):
         self.hot = False
         self._paint()
         self.owner.convert_files(files, self.ext)
+        AppHelper.callLater(0.2, self.owner.hide)
         return True
 
 
@@ -143,8 +166,17 @@ class DragShift(rumps.App):
         self.menu = [rumps.MenuItem("Hold ⇧ while dragging a file"), None]
         self.menu["Hold ⇧ while dragging a file"].set_callback(None)
         self.drop = DropPanel(self)
+        check_permissions()
         mask = NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._on_event)
+
+    def _flash(self, text: str):
+        """Show a result in the menu bar and play a sound; works without notification permission."""
+        def apply():
+            self.title = text
+            NSSound.soundNamed_("Glass").play()
+            AppHelper.callLater(3.0, lambda: setattr(self, "title", "⇧"))
+        AppHelper.callAfter(apply)
 
     def _on_event(self, event):
         if event.type() == 2:  # NSEventTypeLeftMouseUp: give the drop time to land
@@ -158,6 +190,13 @@ class DragShift(rumps.App):
         elif not shift and self.drop.panel is not None:
             self.drop.hide()
 
+    @staticmethod
+    def _notify(title: str, message: str):
+        try:
+            rumps.notification("DragShift", title, message)
+        except Exception as e:  # unbundled Python often cannot post notifications
+            print(f"(notification unavailable: {e})", flush=True)
+
     def run_conversion(self, files: list[Path], ext: str):
         def work():
             done, errors = [], []
@@ -167,9 +206,15 @@ class DragShift(rumps.App):
                 except converter.ConversionError as e:
                     errors.append(f"{f.name}: {e}")
             if done:
-                rumps.notification("DragShift", f"Converted to .{ext}", ", ".join(p.name for p in done[:3]))
+                names = ", ".join(p.name for p in done[:3])
+                print(f"Converted to .{ext}: {names}", flush=True)
+                self._flash("✓")
+                self._notify(f"Converted to .{ext}", names)
             if errors:
-                rumps.notification("DragShift", "Some files failed", "; ".join(errors)[:200])
+                msg = "; ".join(errors)[:200]
+                print(f"Failed: {msg}", flush=True)
+                self._flash("✗")
+                self._notify("Some files failed", msg)
 
         threading.Thread(target=work, daemon=True).start()
 
