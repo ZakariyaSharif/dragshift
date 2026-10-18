@@ -13,6 +13,7 @@ import objc
 import rumps
 from AppKit import (
     NSBackingStoreBuffered,
+    NSBezierPath,
     NSColor,
     NSDragOperationCopy,
     NSDragOperationNone,
@@ -27,6 +28,7 @@ from AppKit import (
     NSMakeRect,
     NSMutableParagraphStyle,
     NSPanel,
+    NSPointInRect,
     NSParagraphStyleAttributeName,
     NSPasteboard,
     NSPasteboardNameDrag,
@@ -73,22 +75,38 @@ def dragged_files() -> list[Path]:
     return [Path(u.path()) for u in urls if u.isFileURL() and Path(u.path()).is_file()]
 
 
-class Tile(NSView):
-    """One drop target, e.g. 'JPG'."""
+class Strip(NSView):
+    """The whole panel: draws every tile and is the single drop destination."""
 
-    def initWithFrame_ext_owner_(self, frame, ext, owner):
-        self = objc.super(Tile, self).initWithFrame_(frame)
+    def initWithFrame_exts_owner_(self, frame, exts, owner):
+        self = objc.super(Strip, self).initWithFrame_(frame)
         if self is None:
             return None
-        self.ext, self.owner, self.hot = ext, owner, False
-        self.setWantsLayer_(True)
-        self.layer().setCornerRadius_(12)
-        self._paint()
+        self.exts, self.owner, self.hot = list(exts), owner, -1
         self.registerForDraggedTypes_([NSPasteboardTypeFileURL, NSFilenamesPboardType])
         return self
 
+    @objc.python_method
+    def tileRect(self, i):
+        return NSMakeRect(PAD + i * (TILE_W + GAP), PAD, TILE_W, TILE_H)
+
+    @objc.python_method
+    def indexFor(self, sender):
+        pt = self.convertPoint_fromView_(sender.draggingLocation(), None)
+        for i in range(len(self.exts)):
+            if NSPointInRect(pt, self.tileRect(i)):
+                return i
+        return -1
+
+    @objc.python_method
+    def setHot(self, i):
+        if i != self.hot:
+            self.hot = i
+            self.setNeedsDisplay_(True)
+
     def drawRect_(self, rect):
-        # Text is drawn here, not in a subview: a label subview would swallow the drag.
+        NSColor.colorWithWhite_alpha_(0.1, 0.92).set()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(self.bounds(), 16, 16).fill()
         style = NSMutableParagraphStyle.alloc().init()
         style.setAlignment_(NSTextAlignmentCenter)
         attrs = {
@@ -96,37 +114,37 @@ class Tile(NSView):
             NSForegroundColorAttributeName: NSColor.whiteColor(),
             NSParagraphStyleAttributeName: style,
         }
-        NSString.stringWithString_(self.ext.upper()).drawInRect_withAttributes_(
-            NSMakeRect(0, (TILE_H - 22) / 2, TILE_W, 22), attrs
-        )
-
-    def draggingUpdated_(self, sender):
-        return NSDragOperationCopy
-
-    def prepareForDragOperation_(self, sender):
-        return True
-
-    def _paint(self):
-        c = NSColor.systemOrangeColor() if self.hot else NSColor.colorWithWhite_alpha_(0.25, 1.0)
-        self.layer().setBackgroundColor_(c.CGColor())
+        for i, ext in enumerate(self.exts):
+            r = self.tileRect(i)
+            (NSColor.systemOrangeColor() if i == self.hot else NSColor.colorWithWhite_alpha_(0.25, 1.0)).set()
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(r, 12, 12).fill()
+            NSString.stringWithString_(ext.upper()).drawInRect_withAttributes_(
+                NSMakeRect(r.origin.x, r.origin.y + (TILE_H - 22) / 2, TILE_W, 22), attrs
+            )
 
     def draggingEntered_(self, sender):
-        print(f"drag entered {self.ext}", flush=True)
-        self.hot = True
-        self._paint()
-        return NSDragOperationCopy
+        return self.draggingUpdated_(sender)
+
+    def draggingUpdated_(self, sender):
+        i = self.indexFor(sender)
+        self.setHot(i)
+        return NSDragOperationCopy if i >= 0 else NSDragOperationNone
 
     def draggingExited_(self, sender):
-        self.hot = False
-        self._paint()
+        self.setHot(-1)
+
+    def prepareForDragOperation_(self, sender):
+        return self.indexFor(sender) >= 0
 
     def performDragOperation_(self, sender):
-        pb = sender.draggingPasteboard()
-        urls = pb.readObjectsForClasses_options_([NSURL], None) or []
+        i = self.indexFor(sender)
+        if i < 0:
+            return False
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None) or []
         files = [Path(u.path()) for u in urls if u.isFileURL()]
-        self.hot = False
-        self._paint()
-        self.owner.convert_files(files, self.ext)
+        print(f"drop on {self.exts[i]}: {[f.name for f in files]}", flush=True)
+        self.setHot(-1)
+        self.owner.convert_files(files, self.exts[i])
         AppHelper.callLater(0.2, self.owner.hide)
         return True
 
@@ -155,17 +173,11 @@ class DropPanel:
         )
         panel.setLevel_(1000)
         panel.setOpaque_(False)
-        panel.setBackgroundColor_(NSColor.colorWithWhite_alpha_(0.1, 0.92))
+        panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHasShadow_(True)
         panel.setHidesOnDeactivate_(False)
-        content = panel.contentView()
-        content.setWantsLayer_(True)
-        content.layer().setCornerRadius_(16)
-        for i, ext in enumerate(exts):
-            tile = Tile.alloc().initWithFrame_ext_owner_(
-                NSMakeRect(PAD + i * (TILE_W + GAP), PAD, TILE_W, TILE_H), ext, self
-            )
-            content.addSubview_(tile)
+        strip = Strip.alloc().initWithFrame_exts_owner_(NSMakeRect(0, 0, w, h), exts, self)
+        panel.setContentView_(strip)
         panel.orderFrontRegardless()
         self.panel = panel
 
