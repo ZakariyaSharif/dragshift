@@ -73,3 +73,25 @@ def test_office_to_pdf(tmp_path):
     txt = tmp_path / "n.txt"
     txt.write_text("hello")
     assert c.convert(txt, "pdf")[0].exists()
+
+
+def test_image_and_pdf_to_pptx(tmp_path):
+    pptx = pytest.importorskip("pptx")
+    pymupdf = pytest.importorskip("pymupdf")
+    from PIL import Image
+
+    Image.new("RGBA", (400, 300), (255, 120, 0, 255)).save(tmp_path / "a.png")
+    out = converter.convert(tmp_path / "a.png", "pptx")[0]
+    assert len(pptx.Presentation(out).slides) == 1
+
+    doc = pymupdf.open()
+    for _ in range(3):
+        doc.new_page().insert_text((72, 72), "hello")
+    doc.save(tmp_path / "m.pdf")
+    out = converter.convert(tmp_path / "m.pdf", "pptx")[0]
+    assert len(pptx.Presentation(out).slides) == 3
+
+
+def test_slide_targets(tmp_path):
+    assert converter.targets_for(tmp_path / "x.pptx") == ["pdf", "png", "jpg", "ppt"]
+    assert "pptx" in converter.targets_for(tmp_path / "x.ppt")

@@ -12,15 +12,17 @@ from pathlib import Path
 IMAGE = {"heic", "heif", "png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp"}
 VIDEO = {"mov", "mp4", "mkv", "avi", "webm", "m4v"}
 AUDIO = {"wav", "mp3", "m4a", "aac", "flac", "ogg", "aiff", "aif"}
-OFFICE = {"docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "rtf", "txt"}
+OFFICE = {"docx", "doc", "xlsx", "xls", "odt", "rtf", "txt"}
+SLIDES = {"pptx", "ppt"}
 PDF = {"pdf"}
 
 TARGETS = {
-    "image": ["png", "jpg", "webp", "pdf", "gif"],
+    "image": ["png", "jpg", "webp", "pdf", "gif", "pptx"],
     "video": ["mp4", "mov", "webm", "gif", "mp3"],
     "audio": ["mp3", "m4a", "wav", "flac", "ogg"],
     "office": ["pdf"],
-    "pdf": ["png", "txt"],
+    "pdf": ["png", "txt", "pptx"],
+    "slides": ["pdf", "png", "jpg", "pptx", "ppt"],
 }
 
 
@@ -36,6 +38,8 @@ def kind_of(path: Path) -> str | None:
         return "video"
     if ext in AUDIO:
         return "audio"
+    if ext in SLIDES:
+        return "slides"
     if ext in OFFICE:
         return "office"
     if ext in PDF:
@@ -82,6 +86,12 @@ def _image(src: Path, ext: str) -> list[Path]:
     except ImportError:
         pass
     out = unique_path(src, ext)
+    if ext == "pptx":
+        with tempfile.TemporaryDirectory() as tmp, Image.open(src) as im:
+            png = Path(tmp) / "slide.png"
+            im.convert("RGB").save(png)
+            _build_pptx([png], out)
+        return [out]
     with Image.open(src) as im:
         if ext in ("jpg", "pdf") and im.mode in ("RGBA", "P", "LA"):
             im = im.convert("RGB")
@@ -134,6 +144,61 @@ def _office(src: Path, ext: str) -> list[Path]:
     return [out]
 
 
+def _build_pptx(images: list[Path], out: Path) -> None:
+    """One full-bleed slide per image; slide shape follows the first image."""
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    prs = Presentation()
+    prs.slide_width = Emu(12192000)  # 13.333 in
+    with Image.open(images[0]) as first:
+        prs.slide_height = Emu(int(prs.slide_width * first.height / first.width))
+    blank = prs.slide_layouts[6]
+    for img in images:
+        with Image.open(img) as im:
+            w, h = im.size
+        scale = min(prs.slide_width / w, prs.slide_height / h)
+        pw, ph = int(w * scale), int(h * scale)
+        slide = prs.slides.add_slide(blank)
+        slide.shapes.add_picture(
+            str(img), (prs.slide_width - pw) // 2, (prs.slide_height - ph) // 2, pw, ph
+        )
+    prs.save(out)
+
+
+def _render_pdf_pages(pdf: Path, folder: Path, ext: str, dpi: int) -> list[Path]:
+    import pymupdf
+
+    pages: list[Path] = []
+    with pymupdf.open(pdf) as doc:
+        for i, page in enumerate(doc, start=1):
+            dest = folder / f"p{i:04d}.{ext}"
+            page.get_pixmap(dpi=dpi, alpha=False).save(dest)
+            pages.append(dest)
+    return pages
+
+
+def _slides(src: Path, ext: str) -> list[Path]:
+    """PowerPoint input: PDF, pptx/ppt via LibreOffice, png/jpg one file per slide."""
+    if ext in ("pdf", "pptx", "ppt"):
+        return _office(src, ext)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        _run([_soffice(), "--headless", "--convert-to", "pdf", "--outdir", str(tmp), str(src)])
+        pdf = tmp / f"{src.stem}.pdf"
+        if not pdf.exists():
+            raise ConversionError("LibreOffice produced no file.")
+        pages = _render_pdf_pages(pdf, tmp, ext, dpi=150)
+        outs = []
+        for i, page in enumerate(pages, start=1):
+            base = src if len(pages) == 1 else src.with_name(f"{src.stem}-p{i}{src.suffix}")
+            out = unique_path(base, ext)
+            shutil.move(str(page), out)
+            outs.append(out)
+    return outs
+
+
 def _pdf(src: Path, ext: str) -> list[Path]:
     import pymupdf
 
@@ -142,6 +207,11 @@ def _pdf(src: Path, ext: str) -> list[Path]:
     if ext == "txt":
         out = unique_path(src, "txt")
         out.write_text("\n\n".join(p.get_text() for p in doc), encoding="utf-8")
+        return [out]
+    if ext == "pptx":
+        out = unique_path(src, "pptx")
+        with tempfile.TemporaryDirectory() as tmp:
+            _build_pptx(_render_pdf_pages(src, Path(tmp), "png", dpi=150), out)
         return [out]
     # png: one file per page
     for i, page in enumerate(doc, start=1):
@@ -166,6 +236,8 @@ def convert(src: str | Path, ext: str) -> list[Path]:
             return _image(src, ext)
         if kind in ("video", "audio"):
             return _ffmpeg(src, ext)
+        if kind == "slides":
+            return _slides(src, ext)
         if kind == "office":
             return _office(src, ext)
         return _pdf(src, ext)

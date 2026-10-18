@@ -9,7 +9,8 @@ Inspired by a post about Tangerine for Mac. This is an independent, open build f
 - Images: HEIC, PNG, JPG, WebP, GIF, TIFF, BMP to PNG, JPG, WebP, PDF, GIF
 - Video: MOV, MP4, MKV, AVI, WebM, M4V to MP4, MOV, WebM, GIF, MP3
 - Audio: WAV, MP3, M4A, AAC, FLAC, OGG, AIFF to MP3, M4A, WAV, FLAC, OGG
-- Documents: DOCX, PPTX, XLSX, ODT, RTF, TXT to PDF. PDF to PNG (one per page) or TXT
+- Documents: DOCX, XLSX, ODT, RTF, TXT to PDF. PDF to PNG (one per page), TXT or PPTX
+- Slides: PPT and PPTX to PDF, PNG or JPG (one per slide), or to each other. Images and PDFs to PPTX (one slide per image or page)
 
 ## Install
 

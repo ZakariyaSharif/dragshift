@@ -3,3 +3,4 @@ pillow-heif
 pymupdf
 rumps
 pyobjc-framework-Cocoa
+python-pptx
